@@ -1364,6 +1364,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     localizer_pose_pub.publish(localizer_pose_msg);
 
     // Send TF "/base_link" to "/map"
+    /*
     transform.setOrigin(tf::Vector3(current_pose.x, current_pose.y, current_pose.z));
     transform.setRotation(current_q);
     //    br.sendTransform(tf::StampedTransform(transform, current_scan_time, "/map", "/base_link"));
@@ -1374,6 +1375,24 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     else
     {
       br.sendTransform(tf::StampedTransform(transform, current_scan_time, "/map", "/base_link"));
+    }
+
+    */
+
+    tf::Transform trans_odom;
+    tf::Quaternion q_odom(odom.pose.pose.orientation.x, odom.pose.pose.orientation.y, 
+      odom.pose.pose.orientation.z, odom.pose.pose.orientation.w);
+    trans_odom.setOrigin(tf::Vector3(odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z));
+    trans_odom.setRotation(q_odom);
+
+    transform.setOrigin(tf::Vector3(current_pose.x, current_pose.y, current_pose.z));
+    transform.setRotation(current_q);
+
+    //tf::Transform trans_odom_to_map = trans_odom.inverseTimes(transform);
+    tf::Transform trans_odom_to_map = transform * trans_odom.inverse();
+
+    {
+      br.sendTransform(tf::StampedTransform(trans_odom_to_map, current_scan_time, "/map", "/odom"));
     }
 
     matching_end = std::chrono::system_clock::now();
