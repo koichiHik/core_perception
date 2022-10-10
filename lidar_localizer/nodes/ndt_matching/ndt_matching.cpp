@@ -929,7 +929,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
   {
     matching_start = std::chrono::system_clock::now();
 
-    static tf::TransformBroadcaster br;
+    //static tf::TransformBroadcaster br;
     tf::Transform transform;
     tf::Quaternion predict_q, ndt_q, current_q, localizer_q;
 
@@ -1379,6 +1379,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
 
     */
 
+    /*
     tf::Transform trans_odom;
     tf::Quaternion q_odom(odom.pose.pose.orientation.x, odom.pose.pose.orientation.y, 
       odom.pose.pose.orientation.z, odom.pose.pose.orientation.w);
@@ -1392,8 +1393,9 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     tf::Transform trans_odom_to_map = transform * trans_odom.inverse();
 
     {
-      br.sendTransform(tf::StampedTransform(trans_odom_to_map, current_scan_time, "/map", "/odom"));
+      //br.sendTransform(tf::StampedTransform(trans_odom_to_map, current_scan_time, "/map", "/odom"));
     }
+    */
 
     matching_end = std::chrono::system_clock::now();
     exe_time = std::chrono::duration_cast<std::chrono::microseconds>(matching_end - matching_start).count() / 1000.0;
