@@ -147,6 +147,9 @@ static geometry_msgs::PoseStamped predict_pose_imu_odom_msg;
 static ros::Publisher ndt_pose_pub;
 static geometry_msgs::PoseStamped ndt_pose_msg;
 
+static ros::Publisher ndt_fixed_pose_pub;
+static geometry_msgs::PoseStamped ndt_fixed_pose_msg;
+
 // current_pose is published by vel_pose_mux
 /*
 static ros::Publisher current_pose_pub;
@@ -207,7 +210,8 @@ static int _queue_size = 1000;
 static ros::Publisher ndt_stat_pub;
 static autoware_msgs::NDTStat ndt_stat_msg;
 
-static double predict_pose_error = 0.0;
+static double predict_trans_error = 0.0;
+static double predict_angle_error = 0.0;
 
 static double _tf_x, _tf_y, _tf_z, _tf_roll, _tf_pitch, _tf_yaw;
 static Eigen::Matrix4f tf_btol;
@@ -225,6 +229,11 @@ static bool _use_odom = false;
 static bool _imu_upside_down = false;
 static bool _output_log_data = false;
 
+// Added parameters.
+static bool _use_predict_pose_for_large_error = false; 
+static double _predict_trans_error_thresh = 0.0;
+static double _predict_angle_error_thresh = 0.0;
+
 static std::string _imu_topic = "/imu_raw";
 
 static std::ofstream ofs;
@@ -239,6 +248,14 @@ static tf::StampedTransform local_transform;
 static unsigned int points_map_num = 0;
 
 pthread_mutex_t mutex;
+
+inline double ComputeAngleBetweenQuaternion(
+  const tf::Quaternion &tf_q1,
+  const tf::Quaternion &tf_q2) {
+
+  tf::Quaternion tf_q1_to_q2 = tf_q2 * tf_q1.inverse();
+  return std::abs(tf_q1_to_q2.getAngleShortestPath());
+}
 
 static pose convertPoseIntoRelativeCoordinate(const pose &target_pose, const pose &reference_pose)
 {
@@ -892,7 +909,7 @@ static void imu_callback(const sensor_msgs::Imu::Ptr& input)
   static double previous_imu_roll = imu_roll, previous_imu_pitch = imu_pitch, previous_imu_yaw = imu_yaw;
   const double diff_imu_roll = calcDiffForRadian(imu_roll, previous_imu_roll);
   const double diff_imu_pitch = calcDiffForRadian(imu_pitch, previous_imu_pitch);
-  const double diff_imu_yaw = calcDiffForRadian(imu_yaw, previous_imu_yaw);
+  const double diff_imu_yaw = calcDiffForRadian(imu_yaw, previous_imu_yaw);  
 
   imu.header = input->header;
   imu.linear_acceleration.x = input->linear_acceleration.x;
@@ -1127,19 +1144,28 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     mat_b.getRPY(ndt_pose.roll, ndt_pose.pitch, ndt_pose.yaw, 1);
 
     // Calculate the difference between ndt_pose and predict_pose
-    predict_pose_error = sqrt((ndt_pose.x - predict_pose_for_ndt.x) * (ndt_pose.x - predict_pose_for_ndt.x) +
-                              (ndt_pose.y - predict_pose_for_ndt.y) * (ndt_pose.y - predict_pose_for_ndt.y) +
-                              (ndt_pose.z - predict_pose_for_ndt.z) * (ndt_pose.z - predict_pose_for_ndt.z));
+    {
+      predict_trans_error = sqrt((ndt_pose.x - predict_pose_for_ndt.x) * (ndt_pose.x - predict_pose_for_ndt.x) +
+                                (ndt_pose.y - predict_pose_for_ndt.y) * (ndt_pose.y - predict_pose_for_ndt.y) +
+                                (ndt_pose.z - predict_pose_for_ndt.z) * (ndt_pose.z - predict_pose_for_ndt.z));
 
-    if (predict_pose_error <= PREDICT_POSE_THRESHOLD)
+      tf::Quaternion q_ndt = tf::createQuaternionFromRPY(ndt_pose.roll, ndt_pose.pitch, ndt_pose.yaw);
+      tf::Quaternion q_predict = tf::createQuaternionFromRPY(predict_pose_for_ndt.roll, predict_pose_for_ndt.pitch, predict_pose_for_ndt.yaw);
+      predict_angle_error =  ComputeAngleBetweenQuaternion(q_ndt, q_predict);
+    }
+
+    if (!_use_predict_pose_for_large_error || 
+      (predict_trans_error <= _predict_trans_error_thresh && predict_angle_error <= _predict_angle_error_thresh))
     {
       use_predict_pose = 0;
     }
     else
     {
+      std::cerr << "Use predict pose." << std::endl;
+      std::cerr << "Trans error : " << predict_trans_error << ", Angle error : " << predict_angle_error / M_PI * 180.0 << std::endl;
       use_predict_pose = 1;
     }
-    use_predict_pose = 0;
+    // use_predict_pose = 0;
 
     if (use_predict_pose == 0)
     {
@@ -1327,6 +1353,16 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     current_pose_msg.pose.orientation.z = current_q.z();
     current_pose_msg.pose.orientation.w = current_q.w();
     */
+    
+    ndt_fixed_pose_msg.header.frame_id = "/map";
+    ndt_fixed_pose_msg.header.stamp = current_scan_time;
+    ndt_fixed_pose_msg.pose.position.x = current_pose.x;
+    ndt_fixed_pose_msg.pose.position.y = current_pose.y;
+    ndt_fixed_pose_msg.pose.position.z = current_pose.z;
+    ndt_fixed_pose_msg.pose.orientation.x = current_q.x();
+    ndt_fixed_pose_msg.pose.orientation.y = current_q.y();
+    ndt_fixed_pose_msg.pose.orientation.z = current_q.z();
+    ndt_fixed_pose_msg.pose.orientation.w = current_q.w();
 
     localizer_q.setRPY(localizer_pose.roll, localizer_pose.pitch, localizer_pose.yaw);
     if (_use_local_transform == true)
@@ -1359,6 +1395,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
     predict_pose_pub.publish(predict_pose_msg);
     health_checker_ptr_->CHECK_RATE("topic_rate_ndt_pose_slow", 8, 5, 1, "topic ndt_pose publish rate slow.");
     ndt_pose_pub.publish(ndt_pose_msg);
+    ndt_fixed_pose_pub.publish(ndt_fixed_pose_msg);
     // current_pose is published by vel_pose_mux
     //    current_pose_pub.publish(current_pose_msg);
     localizer_pose_pub.publish(localizer_pose_msg);
@@ -1454,7 +1491,7 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
             << current_pose.x - predict_pose.x << "," << current_pose.y - predict_pose.y << ","
             << current_pose.z - predict_pose.z << "," << current_pose.roll - predict_pose.roll << ","
             << current_pose.pitch - predict_pose.pitch << "," << current_pose.yaw - predict_pose.yaw << ","
-            << predict_pose_error << "," << iteration << "," << fitness_score << "," << trans_probability << ","
+            << predict_trans_error << "," << iteration << "," << fitness_score << "," << trans_probability << ","
             << ndt_reliability.data << "," << current_velocity << "," << current_velocity_smooth << "," << current_accel
             << "," << angular_velocity << "," << time_ndt_matching.data << "," << align_time << "," << getFitnessScore_time
             << std::endl;
@@ -1581,6 +1618,11 @@ int main(int argc, char** argv)
   private_nh.getParam("imu_topic", _imu_topic);
   private_nh.param<double>("gnss_reinit_fitness", _gnss_reinit_fitness, 500.0);
 
+  // Added parameters.
+  private_nh.getParam("use_predict_pose_for_large_error", _use_predict_pose_for_large_error);
+  private_nh.getParam("predict_trans_error_thresh", _predict_trans_error_thresh);
+  private_nh.getParam("predict_angle_deg_error_thresh", _predict_angle_error_thresh);
+  _predict_angle_error_thresh = _predict_angle_error_thresh / 180.0 * M_PI;
 
   if (nh.getParam("localizer", _localizer) == false)
   {
@@ -1634,6 +1676,10 @@ int main(int argc, char** argv)
   std::cout << "gnss_reinit_fitness: " << _gnss_reinit_fitness << std::endl;
   std::cout << "(tf_x,tf_y,tf_z,tf_roll,tf_pitch,tf_yaw): (" << _tf_x << ", " << _tf_y << ", " << _tf_z << ", "
             << _tf_roll << ", " << _tf_pitch << ", " << _tf_yaw << ")" << std::endl;
+  std::cout << "use_predict_pose_for_large_error: " << _use_predict_pose_for_large_error  << std::endl;
+  std::cout << "predict_trans_error_thresh: " << _predict_trans_error_thresh  << std::endl;
+  std::cout << "predict_angle_deg_error_thresh: " << _predict_angle_error_thresh / M_PI * 180.0  << std::endl;
+
   std::cout << "-----------------------------------------------------------------" << std::endl;
 
 #ifndef CUDA_FOUND
@@ -1675,6 +1721,7 @@ int main(int argc, char** argv)
   predict_pose_odom_pub = nh.advertise<geometry_msgs::PoseStamped>("/predict_pose_odom", 10);
   predict_pose_imu_odom_pub = nh.advertise<geometry_msgs::PoseStamped>("/predict_pose_imu_odom", 10);
   ndt_pose_pub = nh.advertise<geometry_msgs::PoseStamped>("/ndt_pose", 10);
+  ndt_fixed_pose_pub = nh.advertise<geometry_msgs::PoseStamped>("/ndt_fixed_pose", 10);
   // current_pose_pub = nh.advertise<geometry_msgs::PoseStamped>("/current_pose", 10);
   localizer_pose_pub = nh.advertise<geometry_msgs::PoseStamped>("/localizer_pose", 10);
   estimate_twist_pub = nh.advertise<geometry_msgs::TwistStamped>("/estimate_twist", 10);
