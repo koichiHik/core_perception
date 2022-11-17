@@ -100,7 +100,7 @@ enum class MethodType
 static MethodType _method_type = MethodType::PCL_GENERIC;
 
 static pose initial_pose, predict_pose, predict_pose_imu, predict_pose_odom, predict_pose_imu_odom, previous_pose,
-    ndt_pose, current_pose, current_pose_imu, current_pose_odom, current_pose_imu_odom, localizer_pose;
+    ndt_pose, current_pose, current_pose_imu, current_pose_odom, current_pose_imu_odom, localizer_pose, current_sys_pose;
 
 static double offset_x, offset_y, offset_z, offset_yaw;  // current_pos - previous_pose
 static double offset_imu_x, offset_imu_y, offset_imu_z, offset_imu_roll, offset_imu_pitch, offset_imu_yaw;
@@ -230,6 +230,7 @@ static bool _imu_upside_down = false;
 static bool _output_log_data = false;
 
 // Added parameters.
+static bool _use_curpose_as_start = false;
 static bool _use_predict_pose_for_large_error = false; 
 static double _predict_trans_error_thresh = 0.0;
 static double _predict_angle_error_thresh = 0.0;
@@ -255,6 +256,20 @@ inline double ComputeAngleBetweenQuaternion(
 
   tf::Quaternion tf_q1_to_q2 = tf_q2 * tf_q1.inverse();
   return std::abs(tf_q1_to_q2.getAngleShortestPath());
+}
+
+static pose createPoseFromGeometryPose(const geometry_msgs::Pose &input) {
+  pose output;
+
+  output.x = input.position.x;
+  output.y = input.position.y;
+  output.z = input.position.z;
+  const geometry_msgs::Quaternion &gq = input.orientation; 
+  tf::Quaternion tf_q(gq.x, gq.y, gq.z, gq.w);
+  tf::Matrix3x3 m(tf_q);
+  m.getEulerYPR(output.yaw, output.pitch, output.roll);
+
+  return output;
 }
 
 static pose convertPoseIntoRelativeCoordinate(const pose &target_pose, const pose &reference_pose)
@@ -420,6 +435,13 @@ static void param_callback(const autoware_config_msgs::ConfigNDT::ConstPtr& inpu
     current_pose.roll = initial_pose.roll;
     current_pose.pitch = initial_pose.pitch;
     current_pose.yaw = initial_pose.yaw;
+
+    current_sys_pose.x = initial_pose.x;
+    current_sys_pose.y = initial_pose.y;
+    current_sys_pose.z = initial_pose.z;
+    current_sys_pose.roll = initial_pose.roll;
+    current_sys_pose.pitch = initial_pose.pitch;
+    current_sys_pose.yaw = initial_pose.yaw;
 
     current_velocity = 0;
     current_velocity_x = 0;
@@ -645,14 +667,24 @@ static void initialpose_callback(const geometry_msgs::PoseWithCovarianceStamped:
     current_pose.x = input->pose.pose.position.x;
     current_pose.y = input->pose.pose.position.y;
     current_pose.z = input->pose.pose.position.z;
+    current_sys_pose.x = input->pose.pose.position.x;
+    current_sys_pose.y = input->pose.pose.position.y;
+    current_sys_pose.z = input->pose.pose.position.z;
   }
   else
   {
     current_pose.x = input->pose.pose.position.x + transform.getOrigin().x();
     current_pose.y = input->pose.pose.position.y + transform.getOrigin().y();
     current_pose.z = input->pose.pose.position.z + transform.getOrigin().z();
+    current_sys_pose.x = input->pose.pose.position.x + transform.getOrigin().x();
+    current_sys_pose.y = input->pose.pose.position.y + transform.getOrigin().y();
+    current_sys_pose.z = input->pose.pose.position.z + transform.getOrigin().z();
+
   }
   m.getRPY(current_pose.roll, current_pose.pitch, current_pose.yaw);
+  current_sys_pose.roll = current_pose.roll;
+  current_sys_pose.pitch = current_pose.pitch;
+  current_sys_pose.yaw = current_pose.yaw;
 
   if (_get_height == true && map_loaded == 1)
   {
@@ -863,6 +895,11 @@ static void odom_callback(const nav_msgs::Odometry::ConstPtr& input)
   odom_calc(input->header.stamp);
 }
 
+static void curpose_callback(const geometry_msgs::PoseStamped::ConstPtr &input)
+{
+  current_sys_pose = createPoseFromGeometryPose(input->pose);
+}
+
 static void imuUpsideDown(const sensor_msgs::Imu::Ptr input)
 {
   double input_roll, input_pitch, input_yaw;
@@ -1022,14 +1059,17 @@ static void points_callback(const sensor_msgs::PointCloud2::ConstPtr& input)
       odom_calc(current_scan_time);
 
     pose predict_pose_for_ndt;
-    if (_use_imu == true && _use_odom == true)
+    if (_use_imu == true && _use_odom == true) {
       predict_pose_for_ndt = predict_pose_imu_odom;
-    else if (_use_imu == true && _use_odom == false)
+    } else if (_use_imu == true && _use_odom == false) {
       predict_pose_for_ndt = predict_pose_imu;
-    else if (_use_imu == false && _use_odom == true)
+    } else if (_use_imu == false && _use_odom == true) {
       predict_pose_for_ndt = predict_pose_odom;
-    else
+    } else if (_use_curpose_as_start) {
+      predict_pose_for_ndt = current_sys_pose;
+    } else {
       predict_pose_for_ndt = predict_pose;
+    }
 
     Eigen::Translation3f init_translation(predict_pose_for_ndt.x, predict_pose_for_ndt.y, predict_pose_for_ndt.z);
     Eigen::AngleAxisf init_rotation_x(predict_pose_for_ndt.roll, Eigen::Vector3f::UnitX());
@@ -1619,6 +1659,7 @@ int main(int argc, char** argv)
   private_nh.param<double>("gnss_reinit_fitness", _gnss_reinit_fitness, 500.0);
 
   // Added parameters.
+  private_nh.getParam("use_curpose_as_start", _use_curpose_as_start);
   private_nh.getParam("use_predict_pose_for_large_error", _use_predict_pose_for_large_error);
   private_nh.getParam("predict_trans_error_thresh", _predict_trans_error_thresh);
   private_nh.getParam("predict_angle_deg_error_thresh", _predict_angle_error_thresh);
@@ -1740,6 +1781,7 @@ int main(int argc, char** argv)
   ros::Subscriber points_sub = nh.subscribe("filtered_points", _queue_size, points_callback);
   ros::Subscriber odom_sub = nh.subscribe("/vehicle/odom", _queue_size * 10, odom_callback);
   ros::Subscriber imu_sub = nh.subscribe(_imu_topic.c_str(), _queue_size * 10, imu_callback);
+  ros::Subscriber cur_odom_sub = nh.subscribe("/current_pose", _queue_size * 10, curpose_callback);
 
   pthread_t thread;
   pthread_create(&thread, NULL, thread_func, NULL);
